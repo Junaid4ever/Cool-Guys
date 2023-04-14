@@ -1,0 +1,4 @@
+Faker
+Selenium
+Webdriver_manager
+Firefox
