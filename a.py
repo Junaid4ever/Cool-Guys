@@ -48,48 +48,9 @@ fake = Faker('en_IN')
 MUTEX = threading.Lock()
 
 
-def sync_print(text):
-    with MUTEX:
-        print(text)
-
-def get_driver(proxy):
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.83 Safari/537.36"
-    options = webdriver.ChromeOptions()
-    options.headless = True
-#    options.binary_location = "/usr/lib/chromium-browser/chromedriver"
-    options.add_argument(f'user-agent={user_agent}')
-    options.add_experimental_option("detach", True)
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument('--no-sandbox')
-    options.add_argument("--disable-gpu")
-    options.add_argument('--disable-dev-shm-usage')
-    #options.add_argument('--ignore-certificate-errors')
-    options.add_argument('--allow-running-insecure-content')
-    #options.add_argument("--disable-extensions")
-    options.add_argument("--proxy-server='direct://'")
-    options.add_argument("--proxy-bypass-list=*")
-    options.add_argument("--start-maximized")
-    #options.add_argument("--use-fake-ui-for-media-stream")
-    #options.add_argument("--use-fake-device-for-media-stream")
-    options.add_experimental_option("prefs", { \
-    "profile.default_content_setting_values.media_stream_mic": 1, 
-    "profile.default_content_setting_values.media_stream_camera": 1
-  })
-    if proxy is not None:
-        options.add_argument(f"--proxy-server={proxy}")
-    driver = webdriver.Chrome("chromedriver" ,options=options)
-    return driver
-
-
-def driver_wait(driver, locator, by, secs=10, condition=ec.element_to_be_clickable):
-    wait = WebDriverWait(driver=driver, timeout=secs)
-    element = wait.until(condition((by, locator)))
-    return element
-
-
-def start(name, user, wait_time, meetingcode, passcode):
+def start(name, proxy, user, wait_time, meetingcode, passcode):
     sync_print(f"{name} started!")
-    driver = get_driver()
+    driver = get_driver(proxy)
     driver.get(f'https://zoom.us/wc/join/{meetingcode}')
 
     try:
@@ -143,13 +104,12 @@ def main():
         except IndexError:
             break
         wk = threading.Thread(target=start, args=(
-            f'[Thread{i}]', proxy, user, wait_time))
+            f'[Thread{i}]', proxy, user, wait_time, meetingcode, passcode))
         workers.append(wk)
     for wk in workers:
         wk.start()
     for wk in workers:
         wk.join()
-
 
 if __name__ == '__main__':
     number = int(input("Enter number of Users: "))
