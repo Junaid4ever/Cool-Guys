@@ -47,6 +47,10 @@ warnings.filterwarnings('ignore')
 fake = Faker('en_IN')
 MUTEX = threading.Lock()
 
+def sync_print(text):
+    with MUTEX:
+        print(text)
+
 
 def start(name, proxy, user, wait_time, meetingcode, passcode):
     sync_print(f"{name} started!")
