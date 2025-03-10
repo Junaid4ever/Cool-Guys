@@ -1,123 +1,149 @@
-import time
-import warnings
-import threading
-
+import asyncio
+import random
+from concurrent.futures import ThreadPoolExecutor
+from playwright.async_api import async_playwright
 from faker import Faker
-from selenium import webdriver
-from selenium.webdriver.support.wait import WebDriverWait
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as ec
+import nest_asyncio
 
+nest_asyncio.apply()
 
+# Flag to indicate whether the script is running
+running = True
 
-proxylist = [
-    "192.99.101.142:7497",
-    "198.50.198.93:3128",
-    "52.188.106.163:3128",
-    "20.84.57.125:3128",
-    "172.104.13.32:7497",
-    "172.104.14.65:7497",
-    "165.225.220.241:10605",
-    "165.225.208.84:10605",
-    "165.225.39.90:10605",
-    "165.225.208.243:10012",
-    "172.104.20.199:7497",
-    "165.225.220.251:80",
-    "34.110.251.255:80",
-    "159.89.49.172:7497",
-    "165.225.208.178:80",
-    "205.251.66.56:7497",
-    "139.177.203.215:3128",
-    "64.235.204.107:3128",
-    "165.225.38.68:10605",
-    "165.225.56.49:10605",
-    "136.226.75.13:10605",
-    "136.226.75.35:10605",
-    "165.225.56.50:10605",
-    "165.225.56.127:10605",
-    "208.52.166.96:5555",
-    "104.129.194.159:443",
-    "104.129.194.161:443",
-    "165.225.8.78:10458",
-    "5.161.93.53:1080",
-    "165.225.8.100:10605",
-]
+# Semaphore to limit concurrent browser launches
+MAX_CONCURRENT_BROWSERS = 30
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
 
-warnings.filterwarnings('ignore')
-fake = Faker('en_IN')
-MUTEX = threading.Lock()
+# Faker instance for generating names
+faker = Faker('en_IN')
 
-def sync_print(text):
-    with MUTEX:
-        print(text)
+# Hardcoded password
+HARDCODED_PASSWORD = "Fly@1234"
 
+# Verify password function
+def verify_password(password):
+    return password == HARDCODED_PASSWORD
 
-def start(name, proxy, user, wait_time, meetingcode, passcode):
-    sync_print(f"{name} started!")
-    driver = get_driver(proxy)
-    driver.get(f'https://zoom.us/wc/join/{meetingcode}')
+# Generate a unique user name
+def generate_unique_user():
+    return f"{faker.first_name()} {faker.last_name()}"
 
-    try:
-        accept_btn = driver.find_element(By.ID, 'onetrust-accept-btn-handler')
-        accept_btn.click()
-    except Exception as e:
-        pass
+async def start(wait_time, meetingcode, passcode, browser):
+    global running
 
-    try:
-        agree_btn = driver.find_element(By.ID, 'wc_agree1')
-        agree_btn.click()
-    except Exception as e:
-        pass
-
-    try:
-        input_box = driver.find_element(By.CSS_SELECTOR, 'input[type="text"]')
-        input_box.send_keys(user)
-        password_box = driver.find_element(By.CSS_SELECTOR, 'input[type="password"]')
-        password_box.send_keys(passcode)
-        join_button = driver.find_element(By.CSS_SELECTOR, 'button.preview-join-button')
-        join_button.click()
-    except Exception as e:
-        pass
-
-    try:
-        audio_button = driver.find_element(By.XPATH, '//button[text()="Join Audio by Computer"]')
-        time.sleep(13)
-        audio_button.click()
-        print(f"{name} mic aayenge.")
-    except Exception as e:
-        print(f"{name} mic nahe aayenge. ", e)
-
-    sync_print(f"{name} sleep for {wait_time} seconds ...")
-    while running and wait_time > 0:
-        time.sleep(1)
-        wait_time -= 1
-    sync_print(f"{name} ended!")
-
-    driver.quit()
-
-def main():
-    wait_time = sec * 60
-    workers = []
-    for i in range(number):
+    async with semaphore:
         try:
-            proxy = proxylist[i]
-        except Exception:
-            proxy = None
-        try:
-            user = fake.name()
-        except IndexError:
-            break
-        wk = threading.Thread(target=start, args=(
-            f'[Thread{i}]', proxy, user, wait_time, meetingcode, passcode))
-        workers.append(wk)
-    for wk in workers:
-        wk.start()
-    for wk in workers:
-        wk.join()
+            # Generate unique user name
+            user = generate_unique_user()
+            print(f"{user} attempting to join with Chromium.")
 
-if __name__ == '__main__':
-    number = int(input("Enter number of Users: "))
-    meetingcode = input("Enter meeting code (No Space): ")
-    passcode = input("Enter Password (No Space): ")
-    sec = 5
-    main()
+            # Create a new context and page
+            context = await browser.new_context()
+            page = await context.new_page()
+
+            try:
+                await page.goto(f'http://app.zoom.us/wc/join/{meetingcode}', timeout=200000)
+
+                # Simulate user media
+                for _ in range(5):
+                    await page.evaluate('() => { navigator.mediaDevices.getUserMedia({ audio: true, video: true }); }')
+
+                # Accept cookies if prompt appears
+                try:
+                    await page.click('//button[@id="onetrust-accept-btn-handler"]', timeout=5000)
+                except Exception:
+                    pass
+
+                # Accept agreement if prompt appears
+                try:
+                    await page.click('//button[@id="wc_agree1"]', timeout=5000)
+                except Exception:
+                    pass
+
+                # Fill meeting details
+                await page.wait_for_selector('input[type="text"]', timeout=200000)
+                await page.fill('input[type="text"]', user)
+
+                password_field_exists = await page.query_selector('input[type="password"]')
+                if password_field_exists:
+                    await page.fill('input[type="password"]', passcode)
+
+                join_button = await page.wait_for_selector('button.preview-join-button', timeout=200000)
+                await join_button.click()
+
+                # Attempt to join audio
+                retry_count = 5
+                while retry_count > 0:
+                    try:
+                        await page.wait_for_selector('button.join-audio-by-voip__join-btn', timeout=300000)
+                        query = 'button[class*="join-audio-by-voip__join-btn"]'
+                        mic_button_locator = await page.query_selector(query)
+                        await asyncio.sleep(2)
+                        await mic_button_locator.evaluate_handle('node => node.click()')
+                        print(f"{user} successfully joined audio.")
+                        break
+                    except Exception as e:
+                        print(f"Attempt {5 - retry_count + 1}: {user} failed to join audio. Retrying...", e)
+                        retry_count -= 1
+                        await asyncio.sleep(2)
+
+                if retry_count == 0:
+                    print(f"{user} failed to join audio after multiple attempts.")
+
+                # Stay in the meeting
+                print(f"{user} will remain in the meeting for {wait_time} seconds ...")
+                while running and wait_time > 0:
+                    await asyncio.sleep(1)
+                    wait_time -= 1
+                print(f"{user} has left the meeting.")
+            finally:
+                await page.close()
+                await context.close()
+
+        except Exception as e:
+            print(f"An error occurred for {user}: {e}")
+
+async def main():
+    global running
+
+    # Configuration
+    password = "Fly@1234"
+    number = 30
+    meetingcode = "82770760919"
+    passcode = "468111"
+    wait_time = 7200  # Fixed wait time
+
+    if not verify_password(password):
+        print("Wrong password. GET LOST.")
+        return
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--use-fake-ui-for-media-stream',
+                    '--use-fake-device-for-media-stream'
+                ]
+            )
+
+            tasks = []
+            for _ in range(number):
+                tasks.append(start(wait_time, meetingcode, passcode, browser))
+
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except KeyboardInterrupt:
+                running = False
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await browser.close()
+
+    except KeyboardInterrupt:
+        running = False
+        print("Script interrupted by user.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
