@@ -1,111 +1,149 @@
 import asyncio
+import random
+from concurrent.futures import ThreadPoolExecutor
 from playwright.async_api import async_playwright
+from faker import Faker
 import nest_asyncio
-import os
-import indian_names
-import base64
 
-# Apply nest_asyncio to fix event loop issues in Jupyter/Colab
 nest_asyncio.apply()
 
-# Initialize indian_names to generate random Indian names
-def generate_random_name():
-    return indian_names.get_full_name()
+# Flag to indicate whether the script is running
+running = True
 
-# Function to join the meeting after navigation
-async def join_meeting_after_navigation(page):
+# Semaphore to limit concurrent browser launches
+MAX_CONCURRENT_BROWSERS = 30
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
+
+# Faker instance for generating names
+faker = Faker('en_IN')
+
+# Hardcoded password
+HARDCODED_PASSWORD = "Fly@1234"
+
+# Verify password function
+def verify_password(password):
+    return password == HARDCODED_PASSWORD
+
+# Generate a unique user name
+def generate_unique_user():
+    return f"{faker.first_name()} {faker.last_name()}"
+
+async def start(wait_time, meetingcode, passcode, browser):
+    global running
+
+    async with semaphore:
+        try:
+            # Generate unique user name
+            user = generate_unique_user()
+            print(f"{user} attempting to join with Chromium.")
+
+            # Create a new context and page
+            context = await browser.new_context()
+            page = await context.new_page()
+
+            try:
+                await page.goto(f'http://app.zoom.us/wc/join/{meetingcode}', timeout=200000)
+
+                # Simulate user media
+                for _ in range(5):
+                    await page.evaluate('() => { navigator.mediaDevices.getUserMedia({ audio: true, video: true }); }')
+
+                # Accept cookies if prompt appears
+                try:
+                    await page.click('//button[@id="onetrust-accept-btn-handler"]', timeout=5000)
+                except Exception:
+                    pass
+
+                # Accept agreement if prompt appears
+                try:
+                    await page.click('//button[@id="wc_agree1"]', timeout=5000)
+                except Exception:
+                    pass
+
+                # Fill meeting details
+                await page.wait_for_selector('input[type="text"]', timeout=200000)
+                await page.fill('input[type="text"]', user)
+
+                password_field_exists = await page.query_selector('input[type="password"]')
+                if password_field_exists:
+                    await page.fill('input[type="password"]', passcode)
+
+                join_button = await page.wait_for_selector('button.preview-join-button', timeout=200000)
+                await join_button.click()
+
+                # Attempt to join audio
+                retry_count = 5
+                while retry_count > 0:
+                    try:
+                        await page.wait_for_selector('button.join-audio-by-voip__join-btn', timeout=300000)
+                        query = 'button[class*="join-audio-by-voip__join-btn"]'
+                        mic_button_locator = await page.query_selector(query)
+                        await asyncio.sleep(2)
+                        await mic_button_locator.evaluate_handle('node => node.click()')
+                        print(f"{user} successfully joined audio.")
+                        break
+                    except Exception as e:
+                        print(f"Attempt {5 - retry_count + 1}: {user} failed to join audio. Retrying...", e)
+                        retry_count -= 1
+                        await asyncio.sleep(2)
+
+                if retry_count == 0:
+                    print(f"{user} failed to join audio after multiple attempts.")
+
+                # Stay in the meeting
+                print(f"{user} will remain in the meeting for {wait_time} seconds ...")
+                while running and wait_time > 0:
+                    await asyncio.sleep(1)
+                    wait_time -= 1
+                print(f"{user} has left the meeting.")
+            finally:
+                await page.close()
+                await context.close()
+
+        except Exception as e:
+            print(f"An error occurred for {user}: {e}")
+
+async def main():
+    global running
+
+    # Configuration
+    password = "Fly@1234"
+    number = 30
+    meetingcode = "82770760919"
+    passcode = "468111"
+    wait_time = 7200  # Fixed wait time
+
+    if not verify_password(password):
+        print("Wrong password. GET LOST.")
+        return
+
     try:
-        # Wait for the name input field
-        await page.wait_for_selector('input[type="text"]', timeout=60000)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--use-fake-ui-for-media-stream',
+                    '--use-fake-device-for-media-stream'
+                ]
+            )
 
-        # Generate a random Indian name using indian_names library
-        random_name = generate_random_name()
+            tasks = []
+            for _ in range(number):
+                tasks.append(start(wait_time, meetingcode, passcode, browser))
 
-        # Enter the name
-        await page.fill('input[type="text"]', random_name)
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except KeyboardInterrupt:
+                running = False
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await browser.close()
 
-        # Check for password field
-        password_field = await page.query_selector('input[type="password"]')
-        if password_field:
-            await page.fill('input[type="password"]', "your_passcode_here")  # Replace with actual passcode
-            await page.wait_for_selector('button.preview-join-button', timeout=60000)
-            await page.click('button.preview-join-button')
-        else:
-            await page.wait_for_selector('button.preview-join-button', timeout=60000)
-            await page.click('button.preview-join-button')
+    except KeyboardInterrupt:
+        running = False
+        print("Script interrupted by user.")
 
-        # Print once after joining the meeting
-        print(f"✅ {random_name} has joined the meeting. The meeting will last for 7200 seconds.")
-
-        # Keep the meeting open for 7200 seconds (2 hours)
-        await asyncio.sleep(7200)  # 7200 seconds = 2 hours
-        print(f"⏰ {random_name} stayed in the meeting for 7200 seconds.")
-
-    except Exception as e:
-        print(f"❌ Error: {e}")  # Print errors for debugging
-
-# Function to open the browser and join the meeting
-async def open_browser_and_join(meeting_name, meeting_code, meeting_passcode):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-
-        # Create an incognito context
-        context = await browser.new_context()
-
-        # Open new page
-        page = await context.new_page()
-
-        # Mask the URL using Base64 encoding
-        encoded_url = "aHR0cDovL3JvYXJpbmctc3F1aXJyZWwtNGRhNTZjLm5ldGxpZnkuYXBwLw=="
-        meeting_url = base64.b64decode(encoded_url).decode('utf-8')
-
-        # Go to the website
-        print(f"🌐 Navigating to the meeting URL: {meeting_url}")
-        await page.goto(meeting_url)
-
-        # Fill in the meeting details
-        await page.wait_for_selector('input[type="text"]', timeout=60000)
-        await page.locator('input[type="text"]').nth(0).fill(meeting_name)
-        await page.locator('input[type="text"]').nth(1).fill(meeting_code)
-        await page.locator('input[type="text"]').nth(2).fill(meeting_passcode)
-
-        # Click Save Meeting
-        print("💾 Saving meeting details...")
-        await page.click("button:has-text('Save Meeting')")
-
-        # Wait before clicking Join Meeting
-        await asyncio.sleep(3)
-
-        # Click Join Meeting and wait for the new page
-        print("🚀 Joining the meeting...")
-        async with context.expect_page() as new_page_event:
-            await page.click("button:has-text('Join Meeting')")
-
-        # Get the new page
-        new_page = await new_page_event.value
-
-        # Perform the join process
-        await join_meeting_after_navigation(new_page)
-
-        # Close the browser after the total time
-        await browser.close()
-
-# Function to run the script with provided meeting details
-async def run_meeting_joiner(meeting_name, meeting_code, meeting_passcode, num_instances):
-    # Print highline command for better readability
-    print("=" * 50)
-    print("🚀 Starting Meeting Joiner Script")
-    print(f"📅 Meeting Name: {meeting_name}")
-    print(f"🔢 Meeting Code: {meeting_code}")
-    print(f"🔐 Meeting Passcode: {meeting_passcode}")
-    print(f"👥 Number of Instances: {num_instances}")
-    print("=" * 50)
-
-    # Create tasks for multiple instances
-    tasks = [
-        asyncio.create_task(open_browser_and_join(meeting_name, meeting_code, meeting_passcode))
-        for _ in range(num_instances)
-    ]
-
-    # Run all tasks concurrently
-    await asyncio.gather(*tasks)
+if __name__ == "__main__":
+    asyncio.run(main())
